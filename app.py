@@ -3,9 +3,10 @@ import pandas as pd
 import numpy as np
 from scipy.stats import poisson
 
-st.set_page_config(page_title="Floorball Value Betting", page_icon="🥍", layout="wide")
-st.title("🥍 Floorball Value Betting App")
-st.write("Поиск валуйных ставок на основе математической модели (с регуляризацией).")
+# --- НАСТРОЙКИ СТРАНИЦЫ ---
+st.set_page_config(page_title="Floorball Value Terminal", page_icon="🏑", layout="wide")
+st.title("🏑 Floorball Value Terminal")
+st.markdown("Профессиональная аналитика, поиск валуя и банкролл-менеджмент.")
 
 @st.cache_data
 def load_data():
@@ -14,125 +15,194 @@ def load_data():
 df = load_data()
 matches_with_score = df.dropna(subset=['home_score', 'away_score']).copy()
 
+# Считаем средние показатели лиги
 avg_home_goals = matches_with_score['home_score'].mean()
 avg_away_goals = matches_with_score['away_score'].mean()
 
+# Создаем базу знаний по командам
 home_stats = matches_with_score.groupby('home_team').agg({'home_score': 'mean', 'away_score': 'mean'})
 away_stats = matches_with_score.groupby('away_team').agg({'away_score': 'mean', 'home_score': 'mean'})
 
-home_attack = home_stats['home_score']
-home_defense = home_stats['away_score']
-away_attack = away_stats['away_score']
-away_defense = away_stats['home_score']
+def get_team_stats(team_name, is_home):
+    """Возвращает атаку и защиту команды в зависимости от того, дома она играет или в гостях"""
+    if is_home:
+        att = home_stats['home_score'].get(team_name, avg_home_goals)
+        defs = home_stats['away_score'].get(team_name, avg_away_goals)
+    else:
+        att = away_stats['away_score'].get(team_name, avg_away_goals)
+        defs = away_stats['home_score'].get(team_name, avg_home_goals)
+    return att, defs
+
+def get_recent_form(team_name, is_home):
+    """Возвращает последние 5 игр команды (только победы/ничьи/поражения)"""
+    # Ищем последние матчи команды (в качестве хозяев или гостей)
+    team_matches = df[((df['home_team'] == team_name) & df['home_score'].notna()) | 
+                      ((df['away_team'] == team_name) & df['away_score'].notna())]
+    
+    # Берем последние 5 матчей (сортируем по дате, если она есть, иначе просто tail)
+    recent = team_matches.tail(5)
+    
+    form = []
+    for _, row in recent.iterrows():
+        if row['home_team'] == team_name:
+            if row['home_score'] > row['away_score']: form.append("🟢")
+            elif row['home_score'] < row['away_score']: form.append("🔴")
+            else: form.append("🟡")
+        else:
+            if row['away_score'] > row['home_score']: form.append("🟢")
+            elif row['away_score'] < row['home_score']: form.append("🔴")
+            else: form.append("🟡")
+    return "".join(form) if form else "Нет данных"
 
 def predict_probabilities(home, away):
-    h_att = home_attack.get(home, avg_home_goals)
-    h_def = home_defense.get(home, avg_away_goals)
-    a_att = away_attack.get(away, avg_away_goals)
-    a_def = away_defense.get(away, avg_home_goals)
+    h_att, h_def = get_team_stats(home, is_home=True)
+    a_att, a_def = get_team_stats(away, is_home=False)
     
-    # Считаем ожидаемые голы
+    # Считаем ожидаемые голы (Лямбда)
     exp_home = (h_att / avg_home_goals) * (a_def / avg_away_goals) * avg_home_goals
     exp_away = (a_att / avg_away_goals) * (h_def / avg_home_goals) * avg_away_goals
     
-    # СГЛАЖИВАНИЕ (Shrinkage): притягиваем ожидаемые голы к среднему по лиге
-    # Это не даст модели выдавать нереальные вероятности
+    # СГЛАЖИВАНИЕ (Shrinkage)
     exp_home = exp_home * 0.6 + avg_home_goals * 0.4
     exp_away = exp_away * 0.6 + avg_away_goals * 0.4
     
+    # Вер Cloud для расчета вероятностей, фор и тоталов
     p_home, p_draw, p_away = 0, 0, 0
-    for h_g in range(15):
-        for a_g in range(15):
+    total_over_95, total_over_105 = 0, 0
+    handicap_home_minus1 = 0
+    
+    for h_g in range(20):
+        for a_g in range(20):
             p = poisson.pmf(h_g, exp_home) * poisson.pmf(a_g, exp_away)
+            
+            # Исходы (1X2)
             if h_g > a_g: p_home += p
             elif h_g == a_g: p_draw += p
             else: p_away += p
             
-    # Ограничиваем максимальную вероятность (максимум 85%)
-    return min(p_home, 0.85), p_draw, min(p_away, 0.85)
+            # Тоталы
+            if h_g + a_g > 9.5: total_over_95 += p
+            if h_g + a_g > 10.5: total_over_105 += p
+            
+            # Фора хозяев (-1.0) - это победа в 2 и более мяча
+            if (h_g - a_g) >= 2: handicap_home_minus1 += p
+            
+    return {
+        'exp_home': exp_home, 'exp_away': exp_away,
+        'p_home': min(p_home, 0.90), 'p_draw': p_draw, 'p_away': min(p_away, 0.90),
+        'over_9_5': total_over_95, 'over_10_5': total_over_105,
+        'handicap_home_minus1': handicap_home_minus1
+    }
 
-# Берем будущие матчи
+# --- ОТОБРАЖЕНИЕ ПРЕДСТОЯЩИХ МАТЧЕЙ ---
 future_matches = df[df['home_score'].isna()].copy()
 
 if len(future_matches) > 0:
     st.subheader("📊 Предстоящие матчи и прогнозы")
     
-    # Считаем вероятности для будущих матчей
-    future_matches[['p_home', 'p_draw', 'p_away']] = future_matches.apply(
-        lambda row: pd.Series(predict_probabilities(row['home_team'], row['away_team'])), axis=1
-    )
-    
     for index, row in future_matches.iterrows():
-        probs = {'П1': row['p_home'], 'Х': row['p_draw'], 'П2': row['p_away']}
-        best_outcome = max(probs, key=probs.get)
-        best_prob = probs[best_outcome]
+        probs = predict_probabilities(row['home_team'], row['away_team'])
+        
+        # Определяем лучший исход
+        outcomes = {'П1': probs['p_home'], 'Х': probs['p_draw'], 'П2': probs['p_away']}
+        best_outcome = max(outcomes, key=outcomes.get)
+        best_prob = outcomes[best_outcome]
         fair_odds = 1 / best_prob
         
-        # ФИЛЬТР: Показываем только те матчи, где есть смысл ставить (кэф > 1.30)
-        if fair_odds > 1.30:
-            col1, col2, col3 = st.columns([2, 1, 2])
-            with col1:
-                st.write(f"{row['home_team']} (Дом)")
-            with col2:
-                st.write("vs")
-            with col3:
-                st.write(f"{row['away_team']} (Гости)")
-            
-            if best_prob > 0.60:
-                st.success(f"🔥 Рекомендация: {best_outcome} | Вероятность: {best_prob*100:.1f}% | Мин. кэф: {fair_odds:.2f}")
-            else:
-                st.warning(f"⚖️ Возможный валуй: {best_outcome} | Вероятность: {best_prob*100:.1f}% | Мин. кэф: {fair_odds:.2f}")
+        if fair_odds > 1.25: # Фильтр нереальных кэфов
+            # Карточка матча
+            with st.container(border=True):
+                col1, col2, col3 = st.columns([1, 2, 1])
                 
-            st.divider()
-else:
-    st.warning("Нет предстоящих матчей для анализа.")
-    # ==========================================
-# КАЛЬКУЛЯТОР VALUE (EV)
-# ==========================================
-st.divider()
-st.header("🧮 Калькулятор Value (EV)")
-st.write("Введите коэффициент из вашего букмекера, и приложение покажет, есть ли в ставке математическое преимущество.")
+                with col1:
+                    st.markdown(f"### {row['home_team']}")
+                    st.markdown(f"*(Хозяева)*")
+                    st.markdown(f"Форма: **{get_recent_form(row['home_team'], is_home=True)}**")
+                    st.metric(label="xG (Ожидаемые голы)", value=f"{probs['exp_home']:.2f}")
+                    
+                with col2:
+                    st.markdown("<h2 style='text-align: center;'>VS</h2>", unsafe_allow_html=True)
+                    st.markdown(f"<p style='text-align: center;'>Модель Пуассона (λ)</p>", unsafe_allow_html=True)
+                    st.markdown(f"<h4 style='text-align: center;'>{probs['exp_home']:.2f} : {probs['exp_away']:.2f}</h4>", unsafe_allow_html=True)
+                    
+                with col3:
+                    st.markdown(f"### {row['away_team']}")
+                    st.markdown(f"*(Гости)*")
+                    st.markdown(f"Форма: **{get_recent_form(row['away_team'], is_home=False)}**")
+                    st.metric(label="xG (Ожидаемые голы)", value=f"{probs['exp_away']:.2f}")
+                
+                st.divider()
+                
+                # Рекомендация
+                st.markdown(f"**Вероятности модели:** П1: `{probs['p_home']*100:.1f}%` | Х: `{probs['p_draw']*100:.1f}%` | П2: `{probs['p_away']*100:.1f}%`")
+                
+                if best_prob > 0.60:
+                    st.success(f"🔥 VALUE FOUND: **{best_outcome}** | Вероятность: {best_prob*100:.1f}% | Честный кэф: {fair_odds:.2f}")
+                elif best_prob > 0.45:
+                    st.warning(f"⚖️ ВОЗМОЖНЫЙ ВАЛУЙ: **{best_outcome}** | Вероятность: {best_prob*100:.1f}% | Честный кэф: {fair_odds:.2f}")
+                else:
+                    st.info("Матч равных соперников. Пропуск.")
 
-col_team1, col_team2 = st.columns(2)
-home_input = col_team1.text_input("Команда хозяев")
-away_input = col_team2.text_input("Команда гостей")
+# --- КАЛЬКУЛЯТОР VALUE С КЕЛЛИ ---
+st.divider()
+st.header("🧮 Калькулятор Value (EV) и Банкролл-менеджмент")
+
+col_home, col_away = st.columns(2)
+home_input = col_home.text_input("Команда хозяев (например, TPS)")
+away_input = col_away.text_input("Команда гостей (например, Pss)")
+
+# Выбор банка для Келли
+bank = st.number_input("Ваш банк (в рублях/BYN):", min_value=100, value=10000, step=100)
 
 if home_input and away_input:
-    # Считаем вероятности через нашу модель
-    p_home, p_draw, p_away = predict_probabilities(home_input, away_input)
+    probs = predict_probabilities(home_input, away_input)
     
-    st.write(f"Вероятность модели: П1 ({p_home*100:.1f}%) | Х ({p_draw*100:.1f}%) | П2 ({p_away*100:.1f}%)")
+    st.write(f"Ожидаемые голы (λ): **{probs['exp_home']:.2f} : {probs['exp_away']:.2f}**")
     
     col_odds1, col_odds2, col_odds3 = st.columns(3)
     odds_home = col_odds1.number_input("Кэф на П1", min_value=1.01, value=1.80, step=0.05)
     odds_draw = col_odds2.number_input("Кэф на Х", min_value=1.01, value=6.00, step=0.10)
     odds_away = col_odds3.number_input("Кэф на П2", min_value=1.01, value=4.00, step=0.05)
     
-    # Считаем EV для каждого исхода (EV = (Вероятность * Кэф) - 1)
-    ev_home = (p_home * odds_home) - 1
-    ev_draw = (p_draw * odds_draw) - 1
-    ev_away = (p_away * odds_away) - 1
+    # Анализ П1
+    ev_home = (probs['p_home'] * odds_home) - 1
+    # Формула Келли: (P * K - 1) / (K - 1). Дробный Келли: умножаем на 0.25
+    kelly_home = max(0, ((probs['p_home'] * odds_home) - 1) / (odds_home - 1)) * 0.25
+    
+    # Анализ П2
+    ev_away = (probs['p_away'] * odds_away) - 1
+    kelly_away = max(0, ((probs['p_away'] * odds_away) - 1) / (odds_away - 1)) * 0.25
     
     st.write("---")
     col_ev1, col_ev2, col_ev3 = st.columns(3)
     
-    # Вывод П1
     with col_ev1:
         if ev_home > 0:
-            st.success(f"П1: EV = +{ev_home*100:.1f}%\n\n🔥 ВАЛУЙ! Ставить.")
+            st.success(f"🔥 **П1 ВАЛУЙ!**\n\nEV: **+{ev_home*100:.1f}%**\n\nКелли (1/4): {kelly_home*100:.1f}%\n\nСумма: **{bank * kelly_home:.2f}**")
         else:
-            st.error(f"П1: EV = {ev_home*100:.1f}%\n\n❌ Не ставить.")
+            st.error(f"❌ **П1 НЕ СТАВИТЬ**\n\nEV: {ev_home*100:.1f}%")
             
-    # Вывод Ничьей
     with col_ev2:
-        if ev_draw > 0:
-            st.success(f"Х: EV = +{ev_draw*100:.1f}%\n\n🔥 ВАЛУЙ! Ставить.")
-        else:
-            st.error(f"Х: EV = {ev_draw*100:.1f}%\n\n❌ Не ставить.")
-            
-    # Вывод П2
+        st.info(f"Х: EV {((probs['p_draw'] * odds_draw) - 1)*100:.1f}%")
+        
     with col_ev3:
         if ev_away > 0:
-            st.success(f"П2: EV = +{ev_away*100:.1f}%\n\n🔥 ВАЛУЙ! Ставить.")
+            st.success(f"🔥 **П2 ВАЛУЙ!**\n\nEV: **+{ev_away*100:.1f}%**\n\nКелли (1/4): {kelly_away*100:.1f}%\n\nСумма: **{bank * kelly_away:.2f}**")
         else:
-            st.error(f"П2: EV = {ev_away*100:.1f}%\n\n❌ Не ставить.")
+            st.error(f"❌ **П2 НЕ СТАВИТЬ**\n\nEV: {ev_away*100:.1f}%")
+
+    # --- ДОПОЛНИТЕЛЬНЫЕ РЫНКИ (ТОТАЛЫ И ФОРЫ) ---
+    st.write("---")
+    st.subheader("Аналитика тоталов и фор")
+    
+    col_tot1, col_tot2 = st.columns(2)
+    
+    with col_tot1:
+        st.markdown("**Тоталы (Больше)**")
+        st.write(f"ТБ 9.5: Вероятность **{probs['over_9_5']*100:.1f}%** (Честный кэф: {1/probs['over_9_5']:.2f})")
+        st.write(f"ТБ 10.5: Вероятность **{probs['over_10_5']*100:.1f}%** (Честный кэф: {1/probs['over_10_5']:.2f})")
+        
+    with col_tot2:
+        st.markdown("**Форы**")
+        st.write(f"Фора хозяев (-1.0): Вероятность **{probs['handicap_home_minus1']*100:.1f}%** (Честный кэф: {1/probs['handicap_home_minus1']:.2f})")
+        st.write("*Примечание: Фора -1.0 означает победу хозяев в 2 и более мяча.*")
