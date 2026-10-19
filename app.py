@@ -34,15 +34,13 @@ def get_team_stats(team_name, is_home):
     return att, defs
 
 def get_recent_form(team_name, is_home):
-    """Возвращает последние 5 игр команды (только победы/ничьи/поражения)"""
-    # Ищем последние матчи команды (в качестве хозяев или гостей)
+    """Возвращает последние 5 игр команды (победы/ничьи/поражения)"""
     team_matches = df[((df['home_team'] == team_name) & df['home_score'].notna()) | 
                       ((df['away_team'] == team_name) & df['away_score'].notna())]
     
-    # Берем последние 5 матчей (сортируем по дате, если она есть, иначе просто tail)
     recent = team_matches.tail(5)
-    
     form = []
+    
     for _, row in recent.iterrows():
         if row['home_team'] == team_name:
             if row['home_score'] > row['away_score']: form.append("🟢")
@@ -52,6 +50,7 @@ def get_recent_form(team_name, is_home):
             if row['away_score'] > row['home_score']: form.append("🟢")
             elif row['away_score'] < row['home_score']: form.append("🔴")
             else: form.append("🟡")
+            
     return "".join(form) if form else "Нет данных"
 
 def predict_probabilities(home, away):
@@ -62,11 +61,14 @@ def predict_probabilities(home, away):
     exp_home = (h_att / avg_home_goals) * (a_def / avg_away_goals) * avg_home_goals
     exp_away = (a_att / avg_away_goals) * (h_def / avg_home_goals) * avg_away_goals
     
-    # СГЛАЖИВАНИЕ (Shrinkage)
-    exp_home = exp_home * 0.6 + avg_home_goals * 0.4
-    exp_away = exp_away * 0.6 + avg_away_goals * 0.4
+    # 1. Жесткий лимит на аномалии (защита от разгромных счетов в базе)
+    exp_home = min(exp_home, 5.5)
+    exp_away = min(exp_away, 4.5)
     
-    # Вер Cloud для расчета вероятностей, фор и тоталов
+    # 2. СГЛАЖИВАНИЕ (Shrinkage) - притягиваем к среднему по лиге (50/50)
+    exp_home = exp_home * 0.5 + avg_home_goals * 0.5
+    exp_away = exp_away * 0.5 + avg_away_goals * 0.5
+    
     p_home, p_draw, p_away = 0, 0, 0
     total_over_95, total_over_105 = 0, 0
     handicap_home_minus1 = 0
@@ -75,21 +77,19 @@ def predict_probabilities(home, away):
         for a_g in range(20):
             p = poisson.pmf(h_g, exp_home) * poisson.pmf(a_g, exp_away)
             
-            # Исходы (1X2)
             if h_g > a_g: p_home += p
             elif h_g == a_g: p_draw += p
             else: p_away += p
             
-            # Тоталы
             if h_g + a_g > 9.5: total_over_95 += p
             if h_g + a_g > 10.5: total_over_105 += p
-            
-            # Фора хозяев (-1.0) - это победа в 2 и более мяча
             if (h_g - a_g) >= 2: handicap_home_minus1 += p
             
     return {
         'exp_home': exp_home, 'exp_away': exp_away,
-        'p_home': min(p_home, 0.90), 'p_draw': p_draw, 'p_away': min(p_away, 0.90),
+        'p_home': min(p_home, 0.75),  # Потолок 75%
+        'p_draw': p_draw, 
+        'p_away': min(p_away, 0.75),  # Потолок 75%
         'over_9_5': total_over_95, 'over_10_5': total_over_105,
         'handicap_home_minus1': handicap_home_minus1
     }
@@ -103,14 +103,12 @@ if len(future_matches) > 0:
     for index, row in future_matches.iterrows():
         probs = predict_probabilities(row['home_team'], row['away_team'])
         
-        # Определяем лучший исход
         outcomes = {'П1': probs['p_home'], 'Х': probs['p_draw'], 'П2': probs['p_away']}
         best_outcome = max(outcomes, key=outcomes.get)
         best_prob = outcomes[best_outcome]
         fair_odds = 1 / best_prob
         
-        if fair_odds > 1.25: # Фильтр нереальных кэфов
-            # Карточка матча
+        if fair_odds > 1.25:
             with st.container(border=True):
                 col1, col2, col3 = st.columns([1, 2, 1])
                 
@@ -132,8 +130,6 @@ if len(future_matches) > 0:
                     st.metric(label="xG (Ожидаемые голы)", value=f"{probs['exp_away']:.2f}")
                 
                 st.divider()
-                
-                # Рекомендация
                 st.markdown(f"**Вероятности модели:** П1: `{probs['p_home']*100:.1f}%` | Х: `{probs['p_draw']*100:.1f}%` | П2: `{probs['p_away']*100:.1f}%`")
                 
                 if best_prob > 0.60:
@@ -151,7 +147,6 @@ col_home, col_away = st.columns(2)
 home_input = col_home.text_input("Команда хозяев (например, TPS)")
 away_input = col_away.text_input("Команда гостей (например, Pss)")
 
-# Выбор банка для Келли
 bank = st.number_input("Ваш банк (в рублях/BYN):", min_value=100, value=10000, step=100)
 
 if home_input and away_input:
@@ -164,12 +159,9 @@ if home_input and away_input:
     odds_draw = col_odds2.number_input("Кэф на Х", min_value=1.01, value=6.00, step=0.10)
     odds_away = col_odds3.number_input("Кэф на П2", min_value=1.01, value=4.00, step=0.05)
     
-    # Анализ П1
     ev_home = (probs['p_home'] * odds_home) - 1
-    # Формула Келли: (P * K - 1) / (K - 1). Дробный Келли: умножаем на 0.25
     kelly_home = max(0, ((probs['p_home'] * odds_home) - 1) / (odds_home - 1)) * 0.25
     
-    # Анализ П2
     ev_away = (probs['p_away'] * odds_away) - 1
     kelly_away = max(0, ((probs['p_away'] * odds_away) - 1) / (odds_away - 1)) * 0.25
     
