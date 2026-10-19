@@ -50,14 +50,18 @@ def predict_probabilities(home, away):
     h_att, h_def = get_team_stats(home, is_home=True)
     a_att, a_def = get_team_stats(away, is_home=False)
     
+    # 1. Сырые ожидаемые голы (Лямбда)
     exp_home = (h_att / avg_home_goals) * (a_def / avg_away_goals) * avg_home_goals
     exp_away = (a_att / avg_away_goals) * (h_def / avg_home_goals) * avg_away_goals
     
-    # Защита от аномалий и сглаживание
+    # 2. Жесткий лимит на аномалии (не больше 5.5 и 4.5 голов)
     exp_home = min(exp_home, 5.5)
     exp_away = min(exp_away, 4.5)
-    exp_home = exp_home * 0.5 + avg_home_goals * 0.5
-    exp_away = exp_away * 0.5 + avg_away_goals * 0.5
+    
+    # 3. АГРЕССИВНОЕ СГЛАЖИВАНИЕ (30% от команды, 70% от среднего по лиге)
+    # Это защищает от выбросов и делает прогноз реалистичным
+    exp_home = exp_home * 0.3 + avg_home_goals * 0.7
+    exp_away = exp_away * 0.3 + avg_away_goals * 0.7
     
     p_home, p_draw, p_away = 0, 0, 0
     total_over_95, total_over_105 = 0, 0
@@ -156,8 +160,6 @@ with tab3:
     st.subheader("Аналитика дополнительных рынков")
     st.write("Введите те же команды, что и во вкладке калькулятора, чтобы увидеть вероятности тоталов и фор.")
     
-    # Дублируем ввод для удобства на 3-й вкладке (или используем значения из tab2)
-    # Для простоты Streamlit пересчитает их, если они введены
     if 'home_input' in locals() and home_input and away_input:
         probs = predict_probabilities(home_input, away_input)
         col_tot1, col_tot2 = st.columns(2)
