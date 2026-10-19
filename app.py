@@ -86,3 +86,53 @@ if len(future_matches) > 0:
             st.divider()
 else:
     st.warning("Нет предстоящих матчей для анализа.")
+    # ==========================================
+# КАЛЬКУЛЯТОР VALUE (EV)
+# ==========================================
+st.divider()
+st.header("🧮 Калькулятор Value (EV)")
+st.write("Введите коэффициент из вашего букмекера, и приложение покажет, есть ли в ставке математическое преимущество.")
+
+col_team1, col_team2 = st.columns(2)
+home_input = col_team1.text_input("Команда хозяев")
+away_input = col_team2.text_input("Команда гостей")
+
+if home_input and away_input:
+    # Считаем вероятности через нашу модель
+    p_home, p_draw, p_away = predict_probabilities(home_input, away_input)
+    
+    st.write(f"Вероятность модели: П1 ({p_home*100:.1f}%) | Х ({p_draw*100:.1f}%) | П2 ({p_away*100:.1f}%)")
+    
+    col_odds1, col_odds2, col_odds3 = st.columns(3)
+    odds_home = col_odds1.number_input("Кэф на П1", min_value=1.01, value=1.80, step=0.05)
+    odds_draw = col_odds2.number_input("Кэф на Х", min_value=1.01, value=6.00, step=0.10)
+    odds_away = col_odds3.number_input("Кэф на П2", min_value=1.01, value=4.00, step=0.05)
+    
+    # Считаем EV для каждого исхода (EV = (Вероятность * Кэф) - 1)
+    ev_home = (p_home * odds_home) - 1
+    ev_draw = (p_draw * odds_draw) - 1
+    ev_away = (p_away * odds_away) - 1
+    
+    st.write("---")
+    col_ev1, col_ev2, col_ev3 = st.columns(3)
+    
+    # Вывод П1
+    with col_ev1:
+        if ev_home > 0:
+            st.success(f"П1: EV = +{ev_home*100:.1f}%\n\n🔥 ВАЛУЙ! Ставить.")
+        else:
+            st.error(f"П1: EV = {ev_home*100:.1f}%\n\n❌ Не ставить.")
+            
+    # Вывод Ничьей
+    with col_ev2:
+        if ev_draw > 0:
+            st.success(f"Х: EV = +{ev_draw*100:.1f}%\n\n🔥 ВАЛУЙ! Ставить.")
+        else:
+            st.error(f"Х: EV = {ev_draw*100:.1f}%\n\n❌ Не ставить.")
+            
+    # Вывод П2
+    with col_ev3:
+        if ev_away > 0:
+            st.success(f"П2: EV = +{ev_away*100:.1f}%\n\n🔥 ВАЛУЙ! Ставить.")
+        else:
+            st.error(f"П2: EV = {ev_away*100:.1f}%\n\n❌ Не ставить.")
